@@ -22,6 +22,7 @@ from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import excutils
 from oslo_utils import importutils
+import six
 
 from glance.common import exception
 from glance.common import timeutils
@@ -137,7 +138,6 @@ class Image(object):
         extra_properties = kwargs.pop('extra_properties', {})
         self.extra_properties = ExtraProperties(extra_properties)
         self.tags = kwargs.pop('tags', [])
-        self.member = kwargs.pop('member', None)
         if kwargs:
             message = _("__init__() got unexpected keyword argument '%s'")
             raise TypeError(message % list(kwargs.keys())[0])
@@ -258,7 +258,7 @@ class Image(object):
         if self.status == 'active':
             self.status = 'deactivated'
         elif self.status == 'deactivated':
-            # Noop if already deactivate
+            # Noop if already deactive
             pass
         else:
             LOG.debug("Not allowed to deactivate image in status '%s'",
@@ -286,6 +286,18 @@ class Image(object):
     def set_data(self, data, size=None, backend=None, set_active=True):
         raise NotImplementedError()
 
+class Plugin(object):
+
+    def __init__(self, plugin_id, created_at, updated_at, **kwargs):
+        self.plugin_id=plugin_id
+        self.name=kwargs.pop('name')
+        self.type=kwargs.pop('type')
+        self.created_at=created_at
+        self.updated_at=updated_at
+        self.description_en=kwargs.pop('description_en')
+        self.description_fa=kwargs.pop('description_fa')
+        self.platform=kwargs.pop('platform')
+        self.version=kwargs.pop('version')
 
 class ExtraProperties(abc.MutableMapping, dict):
 
@@ -395,9 +407,9 @@ class Task(object):
     @message.setter
     def message(self, message):
         if message:
-            self._message = str(message)
+            self._message = six.text_type(message)
         else:
-            self._message = ''
+            self._message = six.text_type('')
 
     def _validate_task_status_transition(self, cur_status, new_status):
         valid_transitions = {
@@ -521,7 +533,7 @@ class TaskExecutorFactory(object):
                 if not TaskExecutorFactory.eventlet_deprecation_warned:
                     msg = _LW("The `eventlet` executor has been deprecated. "
                               "Use `taskflow` instead.")
-                    LOG.warning(msg)
+                    LOG.warn(msg)
                     TaskExecutorFactory.eventlet_deprecation_warned = True
                 task_executor = 'taskflow'
 
@@ -537,7 +549,7 @@ class TaskExecutorFactory(object):
         except ImportError:
             with excutils.save_and_reraise_exception():
                 LOG.exception(_LE("Failed to load the %s executor provided "
-                                  "in the config."), CONF.task.task_executor)
+                                  "in the config.") % CONF.task.task_executor)
 
 
 class MetadefNamespace(object):

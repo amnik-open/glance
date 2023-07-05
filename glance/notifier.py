@@ -22,6 +22,7 @@ from oslo_log import log as logging
 import oslo_messaging
 from oslo_utils import encodeutils
 from oslo_utils import excutils
+import six
 import webob
 
 from glance.common import exception
@@ -71,7 +72,7 @@ Possible values:
     * metadef_tag
 
     For a complete listing and description of each event refer to:
-    https://docs.openstack.org/glance/latest/admin/notifications.html
+    http://docs.openstack.org/developer/glance/notifications.html
 
     The values must be specified as: <group_name>.<event_name>
     For example: image.create,task.success,metadef_tag
@@ -180,6 +181,23 @@ def format_image_member_notification(image_member):
         'deleted_at': None,
     }
 
+def format_plugin_notification(plugin):
+    """Given a glance.domain.plugin object, return a dictionary of relevant
+    notification information.
+    """
+    return {
+        'plugin_id': plugin.plugin_id,
+        'platform': plugin.platform,
+        'description_en': plugin.description_en,
+        'description_fa': plugin.description_fa,
+        'type': plugin.type,
+        'name': plugin.name,
+        'version': plugin.version,
+        'created_at': timeutils.isotime(plugin.created_at),
+        'updated_at': timeutils.isotime(plugin.updated_at),
+        'deleted': False,
+        'deleted_at': None,
+    }
 
 def format_task_notification(task):
     # NOTE(nikhil): input is not passed to the notifier payload as it may
@@ -218,7 +236,7 @@ def format_metadef_namespace_notification(metadef_namespace):
 def format_metadef_object_notification(metadef_object):
     object_properties = metadef_object.properties or {}
     properties = []
-    for name, prop in object_properties.items():
+    for name, prop in six.iteritems(object_properties):
         object_property = _format_metadef_object_property(name, prop)
         properties.append(object_property)
 
@@ -329,7 +347,8 @@ class NotificationBase(object):
         _send_notification(self.notifier.info, notification_id, payload)
 
 
-class NotificationProxy(NotificationBase, metaclass=abc.ABCMeta):
+@six.add_metaclass(abc.ABCMeta)
+class NotificationProxy(NotificationBase):
     def __init__(self, repo, context, notifier):
         self.repo = repo
         self.context = context
@@ -343,7 +362,8 @@ class NotificationProxy(NotificationBase, metaclass=abc.ABCMeta):
         pass
 
 
-class NotificationRepoProxy(NotificationBase, metaclass=abc.ABCMeta):
+@six.add_metaclass(abc.ABCMeta)
+class NotificationRepoProxy(NotificationBase):
     def __init__(self, repo, context, notifier):
         self.repo = repo
         self.context = context
@@ -363,7 +383,8 @@ class NotificationRepoProxy(NotificationBase, metaclass=abc.ABCMeta):
         pass
 
 
-class NotificationFactoryProxy(metaclass=abc.ABCMeta):
+@six.add_metaclass(abc.ABCMeta)
+class NotificationFactoryProxy(object):
     def __init__(self, factory, context, notifier):
         kwargs = {'context': context, 'notifier': notifier}
 
@@ -577,6 +598,29 @@ class ImageMemberRepoProxy(NotificationBase, domain_proxy.MemberRepo):
             'deleted': True, 'deleted_at': timeutils.isotime()
         })
 
+class PluginProxy(NotificationProxy, domain_proxy.Plugin):
+    def get_super_class(self):
+        return domain_proxy.Plugin
+
+class PluginRepoProxy(NotificationBase, domain_proxy.PluginRepo):
+    def __init__(self, repo, context, notifier):
+        self.repo = repo
+        self.context = context
+        self.notifier = notifier
+        proxy_kwargs = {'context': self.context, 'notifier': self.notifier}
+
+        proxy_class = self.get_proxy_class()
+        super_class = self.get_super_class()
+        super_class.__init__(self, repo, proxy_class, proxy_kwargs)
+
+    def get_super_class(self):
+        return domain_proxy.PluginRepo
+
+    def get_proxy_class(self):
+        return PluginProxy
+
+    def get_payload(self, obj):
+        return format_plugin_notification(obj)
 
 class TaskProxy(NotificationProxy, domain_proxy.Task):
     def get_super_class(self):
@@ -913,9 +957,8 @@ class MetadefTagRepoProxy(NotificationRepoProxy, domain_proxy.MetadefTagRepo):
         self.send_notification('metadef_tag.create', metadef_tag)
         return result
 
-    def add_tags(self, metadef_tags, can_append=False):
-        result = super(MetadefTagRepoProxy, self).add_tags(metadef_tags,
-                                                           can_append)
+    def add_tags(self, metadef_tags):
+        result = super(MetadefTagRepoProxy, self).add_tags(metadef_tags)
         for metadef_tag in metadef_tags:
             self.send_notification('metadef_tag.create', metadef_tag)
 

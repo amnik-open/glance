@@ -13,7 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from glance.api.v2 import cached_images
 from glance.api.v2 import discovery
 from glance.api.v2 import image_actions
 from glance.api.v2 import image_data
@@ -27,6 +26,7 @@ from glance.api.v2 import metadef_resource_types
 from glance.api.v2 import metadef_tags
 from glance.api.v2 import schemas
 from glance.api.v2 import tasks
+from glance.api.v2 import plugins
 from glance.common import wsgi
 
 
@@ -542,6 +542,12 @@ class API(wsgi.Router):
                        action='reject',
                        allowed_methods='GET, PUT, DELETE')
 
+        plugins_resource = plugins.create_resource()
+        mapper.connect('/plugins',
+                       controller=plugins_resource,
+                       action='index',
+                       conditions={'method': ['GET']})
+
         tasks_resource = tasks.create_resource()
         mapper.connect('/tasks',
                        controller=tasks_resource,
@@ -589,46 +595,5 @@ class API(wsgi.Router):
                        controller=reject_method_resource,
                        action='reject',
                        allowed_methods='GET')
-        mapper.connect('/info/usage',
-                       controller=info_resource,
-                       action='get_usage',
-                       conditions={'method': ['GET']})
-        mapper.connect('/info/stores/detail',
-                       controller=info_resource,
-                       action='get_stores_detail',
-                       conditions={'method': ['GET']},
-                       body_reject=True)
-        mapper.connect('/info/stores/detail',
-                       controller=reject_method_resource,
-                       action='reject',
-                       allowed_methods='GET')
-
-        # Cache Management API
-        cache_manage_resource = cached_images.create_resource()
-        mapper.connect('/cache',
-                       controller=cache_manage_resource,
-                       action='get_cache_state',
-                       conditions={'method': ['GET']},
-                       body_reject=True)
-        mapper.connect('/cache',
-                       controller=cache_manage_resource,
-                       action='clear_cache',
-                       conditions={'method': ['DELETE']})
-        mapper.connect('/cache',
-                       controller=reject_method_resource,
-                       action='reject',
-                       allowed_methods='GET, DELETE')
-        mapper.connect('/cache/{image_id}',
-                       controller=cache_manage_resource,
-                       action='delete_cache_entry',
-                       conditions={'method': ['DELETE']})
-        mapper.connect('/cache/{image_id}',
-                       controller=cache_manage_resource,
-                       action='queue_image_from_api',
-                       conditions={'method': ['PUT']})
-        mapper.connect('/cache/{image_id}',
-                       controller=reject_method_resource,
-                       action='reject',
-                       allowed_methods='DELETE, PUT')
 
         super(API, self).__init__(mapper)

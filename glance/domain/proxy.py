@@ -194,7 +194,6 @@ class Image(object):
     virtual_size = _proxy('base', 'virtual_size')
     extra_properties = _proxy('base', 'extra_properties')
     tags = _proxy('base', 'tags')
-    member = _proxy('base', 'member')
 
     def delete(self):
         self.base.delete()
@@ -223,6 +222,29 @@ class ImageMember(object):
     created_at = _proxy('base', 'created_at')
     updated_at = _proxy('base', 'updated_at')
 
+class Plugin(object):
+    def __init__(self, base):
+        self.base = base
+
+    id = _proxy('base', 'id')
+    created_at = _proxy('base', 'created_at')
+    updated_at = _proxy('base', 'updated_at')
+    name = _proxy('base', 'name')
+    description_en = _proxy('base', 'description_en')
+    description_fa = _proxy('base', 'description_fa')
+    platform = _proxy('base', 'platform')
+    version = _proxy('base', 'version')
+    type = _proxy('base', 'type')
+
+class PluginRepo(object):
+
+    def __init__(self, base, plugin_proxy_class=None, plugin_proxy_kwargs=None):
+        self.base = base
+        self.plugin_proxy_helper = Helper(plugin_proxy_class, plugin_proxy_kwargs)
+
+    def list(self, *args, **kwargs):
+        items = self.base.list(*args, **kwargs)
+        return [self.plugin_proxy_helper.proxy(item) for item in items]
 
 class Task(object):
     def __init__(self, base):
@@ -547,11 +569,11 @@ class MetadefTagRepo(object):
     def add(self, meta_tag):
         self.base.add(self.tag_proxy_helper.unproxy(meta_tag))
 
-    def add_tags(self, meta_tags, can_append=False):
+    def add_tags(self, meta_tags):
         tags_list = []
         for meta_tag in meta_tags:
             tags_list.append(self.tag_proxy_helper.unproxy(meta_tag))
-        self.base.add_tags(tags_list, can_append)
+        self.base.add_tags(tags_list)
 
     def list(self, *args, **kwargs):
         tags = self.base.list(*args, **kwargs)
