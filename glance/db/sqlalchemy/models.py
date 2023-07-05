@@ -257,10 +257,25 @@ class TaskInfo(BASE, models.ModelBase):
     result = Column(JSONEncodedDict())
     message = Column(Text)
 
+class Plugins(BASE, GlanceBase):
+    """Represents Plugins in the datastore"""
+    __tablename__ = 'plugins'
+    __table_args__ = (Index('ix_plugins_name', 'name'),
+                      Index('ix_plugins_platform', 'platform'),
+                      Index('ix_images_type', 'type'),)
+
+    id = Column(String(36), primary_key=True,
+                default=lambda: str(uuid.uuid4()))
+    name = Column(String(255), nullable=False, unique=True)
+    description_en = Column(Text())
+    description_fa = Column(Text())
+    platform = Column(String(10), nullable=False)
+    version = Column(String(10), nullable=False)
+    type = Column(String(10), nullable=False)
 
 def register_models(engine):
     """Create database tables for all models with the given engine."""
-    models = (Image, ImageProperty, ImageMember)
+    models = (Image, ImageProperty, ImageMember, plugins)
     for model in models:
         model.metadata.create_all(engine)
 
@@ -270,3 +285,4 @@ def unregister_models(engine):
     models = (Image, ImageProperty)
     for model in models:
         model.metadata.drop_all(engine)
+

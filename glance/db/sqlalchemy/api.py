@@ -22,7 +22,6 @@
 """Defines interface for DB access."""
 
 import datetime
-import itertools
 import threading
 
 from oslo_config import cfg
@@ -32,6 +31,9 @@ from oslo_log import log as logging
 from oslo_utils import excutils
 import osprofiler.sqlalchemy
 from retrying import retry
+import six
+# NOTE(jokke): simplified transition to py3, behaves like py2 xrange
+from six.moves import range
 import sqlalchemy
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy import MetaData, Table
@@ -72,7 +74,7 @@ def _retry_on_deadlock(exc):
     """Decorator to retry a DB API call if Deadlock was received."""
 
     if isinstance(exc, db_exception.DBDeadlock):
-        LOG.warning(_LW("Deadlock detected. Retrying..."))
+        LOG.warn(_LW("Deadlock detected. Retrying..."))
         return True
     return False
 
@@ -129,7 +131,7 @@ def clear_db_env():
 
 def _check_mutate_authorization(context, image_ref):
     if not is_image_mutable(context, image_ref):
-        LOG.warning(_LW("Attempted to modify image user did not own."))
+        LOG.warn(_LW("Attempted to modify image user did not own."))
         msg = _("You do not own this image")
         if image_ref.visibility in ['private', 'shared']:
             exc_class = exception.Forbidden
@@ -362,7 +364,7 @@ def _paginate_query(query, model, limit, sort_keys, marker=None,
     if 'id' not in sort_keys:
         # TODO(justinsb): If this ever gives a false-positive, check
         # the actual primary key, rather than assuming its id
-        LOG.warning(_LW('Id not in sort_keys; is sort_keys unique?'))
+        LOG.warn(_LW('Id not in sort_keys; is sort_keys unique?'))
 
     assert(not (sort_dir and sort_dirs))  # nosec
     # nosec: This function runs safely if the assertion fails.
@@ -739,78 +741,9 @@ def _image_get_disk_usage_by_owner(owner, session, image_id=None):
 
     total = 0
     for i in images:
-        locations = [location for location in i.locations
-                     if location['status'] != 'deleted']
+        locations = [l for l in i.locations if l['status'] != 'deleted']
         total += (i.size * len(locations))
     return total
-
-
-def _image_get_staging_usage_by_owner(owner, session):
-    # NOTE(danms): We could do this in a single query, but I think it is
-    # easier to understand as two that we concatenate while generating
-    # results.
-
-    # Images in uploading or importing state are consuming staging
-    # space.
-    query = session.query(models.Image)
-    query = query.filter(models.Image.owner == owner)
-    query = query.filter(models.Image.size > 0)
-    query = query.filter(models.Image.status.in_(('uploading',
-                                                  'importing')))
-    importing_images = query.all()
-
-    # Images with non-empty os_glance_importing_to_stores properties
-    # may also be consuming staging space. Filter our deleted images
-    # or importing ones included in the above query.
-    props = session.query(models.ImageProperty).filter(
-        models.ImageProperty.name == 'os_glance_importing_to_stores',
-        models.ImageProperty.value != '').subquery()
-    query = session.query(models.Image)
-    query = query.join(props, props.c.image_id == models.Image.id)
-    query = query.filter(models.Image.owner == owner)
-    query = query.filter(models.Image.size > 0)
-    query = query.filter(~models.Image.status.in_(('uploading',
-                                                   'importing',
-                                                   'killed',
-                                                   'deleted')))
-    copying_images = query.all()
-
-    return sum(i.size for i in itertools.chain(importing_images,
-                                               copying_images))
-
-
-def _image_get_count_by_owner(owner, session):
-    query = session.query(models.Image)
-    query = query.filter(models.Image.owner == owner)
-    query = query.filter(~models.Image.status.in_(['killed', 'deleted']))
-    return query.count()
-
-
-def _image_get_uploading_count_by_owner(owner, session):
-    """Return a count of the images uploading or importing."""
-
-    importing_statuses = ('saving', 'uploading', 'importing')
-
-    # Images in any state indicating uploading, including through image_upload
-    # or importing count for this.
-    query = session.query(models.Image)
-    query = query.filter(models.Image.owner == owner)
-    query = query.filter(models.Image.status.in_(importing_statuses))
-    uploading = query.count()
-
-    # Images that are not in the above list, but are not deleted and
-    # in the process of doing a copy count for this.
-    props = session.query(models.ImageProperty).filter(
-        models.ImageProperty.name == 'os_glance_importing_to_stores',
-        models.ImageProperty.value != '').subquery()
-    query = session.query(models.Image)
-    query = query.join(props, props.c.image_id == models.Image.id)
-    query = query.filter(models.Image.owner == owner)
-    query = query.filter(~models.Image.status.in_(importing_statuses +
-                                                  ('killed', 'deleted')))
-    copying = query.count()
-
-    return uploading + copying
 
 
 def _validate_image(values, mandatory_status=True):
@@ -1085,7 +1018,7 @@ def image_location_update(context, image_id, location, session=None):
     except sa_orm.exc.NoResultFound:
         msg = (_("No location found with ID %(loc)s from image %(img)s") %
                dict(loc=loc_id, img=image_id))
-        LOG.warning(msg)
+        LOG.warn(msg)
         raise exception.NotFound(msg)
 
 
@@ -1111,7 +1044,7 @@ def image_location_delete(context, image_id, location_id, status,
     except sa_orm.exc.NoResultFound:
         msg = (_("No location found with ID %(loc)s from image %(img)s") %
                dict(loc=location_id, img=image_id))
-        LOG.warning(msg)
+        LOG.warn(msg)
         raise exception.NotFound(msg)
 
 
@@ -1173,7 +1106,7 @@ def _set_properties_for_image(context, image_ref, properties,
     for prop_ref in image_ref.properties:
         orig_properties[prop_ref.name] = prop_ref
 
-    for name, value in properties.items():
+    for name, value in six.iteritems(properties):
         prop_values = {'image_id': image_ref.id,
                        'name': name,
                        'value': value}
@@ -1249,20 +1182,12 @@ def _image_property_update(context, prop_ref, values, session=None):
 
 def image_property_delete(context, prop_ref, image_ref, session=None):
     """
-    Used internally by _set_properties_for_image().
+    Used internally by image_property_create and image_property_update.
     """
     session = session or get_session()
     prop = session.query(models.ImageProperty).filter_by(image_id=image_ref,
                                                          name=prop_ref).one()
-    try:
-        prop.delete(session=session)
-    except sa_orm.exc.StaleDataError as e:
-        LOG.debug(('StaleDataError while deleting property %(prop)r '
-                   'from image %(image)r likely means we raced during delete: '
-                   '%(err)s'),
-                  {'prop': prop_ref, 'image': image_ref,
-                   'err': str(e)})
-        return
+    prop.delete(session=session)
     return prop
 
 
@@ -1511,12 +1436,9 @@ def purge_deleted_rows(context, age_in_days, max_rows, session=None):
     t = Table("tasks", metadata, autoload=True)
     ti = Table("task_info", metadata, autoload=True)
     joined_rec = ti.join(t, t.c.id == ti.c.task_id)
-    deleted_task_info = sql.\
-        select([ti.c.task_id], t.c.deleted_at < deleted_age).\
-        select_from(joined_rec).\
-        order_by(t.c.deleted_at)
-    if max_rows != -1:
-        deleted_task_info = deleted_task_info.limit(max_rows)
+    deleted_task_info = sql.select([ti.c.task_id],
+                                   t.c.deleted_at < deleted_age).\
+        select_from(joined_rec).order_by(t.c.deleted_at).limit(max_rows)
     delete_statement = DeleteFromSelect(ti, deleted_task_info,
                                         ti.c.task_id)
     LOG.info(_LI('Purging deleted rows older than %(age_in_days)d day(s) '
@@ -1528,7 +1450,7 @@ def purge_deleted_rows(context, age_in_days, max_rows, session=None):
     except (db_exception.DBError, db_exception.DBReferenceError) as ex:
         LOG.exception(_LE('DBError detected when force purging '
                           'table=%(table)s: %(error)s'),
-                      {'table': ti, 'error': str(ex)})
+                      {'table': ti, 'error': six.text_type(ex)})
         raise
 
     rows = result.rowcount
@@ -1560,10 +1482,9 @@ def purge_deleted_rows(context, age_in_days, max_rows, session=None):
         column = tab.c.id
         deleted_at_column = tab.c.deleted_at
 
-        query_delete = sql.select([column], deleted_at_column < deleted_age).\
-            order_by(deleted_at_column)
-        if max_rows != -1:
-            query_delete = query_delete.limit(max_rows)
+        query_delete = sql.select(
+            [column], deleted_at_column < deleted_age).order_by(
+            deleted_at_column).limit(max_rows)
 
         delete_statement = DeleteFromSelect(tab, query_delete, column)
 
@@ -1574,7 +1495,7 @@ def purge_deleted_rows(context, age_in_days, max_rows, session=None):
             with excutils.save_and_reraise_exception():
                 LOG.error(_LE('DBError detected when purging from '
                           "%(tablename)s: %(error)s"),
-                          {'tablename': tbl, 'error': str(ex)})
+                          {'tablename': tbl, 'error': six.text_type(ex)})
 
         rows = result.rowcount
         LOG.info(_LI('Deleted %(rows)d row(s) from table %(tbl)s'),
@@ -1605,11 +1526,9 @@ def purge_deleted_rows_from_images(context, age_in_days, max_rows,
     column = tab.c.id
     deleted_at_column = tab.c.deleted_at
 
-    query_delete = sql.\
-        select([column], deleted_at_column < deleted_age).\
-        order_by(deleted_at_column)
-    if max_rows != -1:
-        query_delete = query_delete.limit(max_rows)
+    query_delete = sql.select(
+        [column], deleted_at_column < deleted_age).order_by(
+        deleted_at_column).limit(max_rows)
 
     delete_statement = DeleteFromSelect(tab, query_delete, column)
 
@@ -1620,7 +1539,7 @@ def purge_deleted_rows_from_images(context, age_in_days, max_rows,
         with excutils.save_and_reraise_exception():
             LOG.error(_LE('DBError detected when purging from '
                       "%(tablename)s: %(error)s"),
-                      {'tablename': tbl, 'error': str(ex)})
+                      {'tablename': tbl, 'error': six.text_type(ex)})
 
     rows = result.rowcount
     LOG.info(_LI('Deleted %(rows)d row(s) from table %(tbl)s'),
@@ -1633,21 +1552,6 @@ def user_get_storage_usage(context, owner_id, image_id=None, session=None):
     total_size = _image_get_disk_usage_by_owner(
         owner_id, session, image_id=image_id)
     return total_size
-
-
-def user_get_staging_usage(context, owner_id, session=None):
-    session = session or get_session()
-    return _image_get_staging_usage_by_owner(owner_id, session)
-
-
-def user_get_image_count(context, owner_id, session=None):
-    session = session or get_session()
-    return _image_get_count_by_owner(owner_id, session)
-
-
-def user_get_uploading_count(context, owner_id, session=None):
-    session = session or get_session()
-    return _image_get_uploading_count_by_owner(owner_id, session)
 
 
 def _task_info_format(task_info_ref):
@@ -1957,6 +1861,16 @@ def _task_format(task_ref, task_info_ref=None):
 
     return task_dict
 
+def plugin_get_all(context, session=None):
+    """Get a list of Plugins"""
+    session = session or get_session()
+    query = session.query(models.Plugins).all()
+    plugins = []
+    for plugin in query:
+        plugins.append(plugin.to_dict())
+    LOG.debug("####################### ********DB API******************########################")
+    LOG.debug(plugins)
+    return plugins
 
 def metadef_namespace_get_all(context, marker=None, limit=None, sort_key=None,
                               sort_dir=None, filters=None, session=None):
@@ -2187,11 +2101,11 @@ def metadef_tag_create(context, namespace_name, tag_dict,
 
 
 def metadef_tag_create_tags(context, namespace_name, tag_list,
-                            can_append=False, session=None):
+                            session=None):
     """Create a metadata-schema tag or raise if it already exists."""
     session = get_session()
     return metadef_tag_api.create_tags(
-        context, namespace_name, tag_list, can_append, session)
+        context, namespace_name, tag_list, session)
 
 
 @utils.no_4byte_params
@@ -2223,3 +2137,4 @@ def metadef_tag_count(context, namespace_name, session=None):
     """Get count of tags for a namespace, raise if ns doesn't exist."""
     session = session or get_session()
     return metadef_tag_api.count(context, namespace_name, session)
+

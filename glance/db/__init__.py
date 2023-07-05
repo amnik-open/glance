@@ -28,6 +28,9 @@ from glance.common import location_strategy
 import glance.domain
 import glance.domain.proxy
 from glance.i18n import _
+from oslo_log import log as logging
+
+LOG = logging.getLogger(__name__)
 
 CONF = cfg.CONF
 CONF.import_opt('image_size_cap', 'glance.common.config')
@@ -103,20 +106,8 @@ class ImageRepo(object):
                      if loc['status'] == 'active']
         if CONF.metadata_encryption_key:
             key = CONF.metadata_encryption_key
-            for location in locations:
-                location['url'] = crypt.urlsafe_decrypt(key, location['url'])
-
-        # NOTE(danms): If the image is shared and we are not the
-        # owner, we must have found it because we are a member. Set
-        # our tenant on the image as 'member' for policy checks in the
-        # upper layers. For any other image stage, we found the image
-        # some other way, so leave member=None.
-        if (db_image['visibility'] == 'shared' and
-                self.context.owner != db_image['owner']):
-            member = self.context.owner
-        else:
-            member = None
-
+            for l in locations:
+                l['url'] = crypt.urlsafe_decrypt(key, l['url'])
         return glance.domain.Image(
             image_id=db_image['id'],
             name=db_image['name'],
@@ -139,7 +130,6 @@ class ImageRepo(object):
             extra_properties=properties,
             tags=db_tags,
             os_hidden=db_image['os_hidden'],
-            member=member,
         )
 
     def _format_image_to_db(self, image):
@@ -195,13 +185,17 @@ class ImageRepo(object):
         if (image_values['size'] is not None
            and image_values['size'] > CONF.image_size_cap):
             raise exception.ImageSizeLimitExceeded
-        new_values = self.db_api.image_update(self.context,
-                                              image.image_id,
-                                              image_values,
-                                              purge_props=True,
-                                              from_state=from_state,
-                                              atomic_props=(
-                                                  IMAGE_ATOMIC_PROPS))
+        try:
+            new_values = self.db_api.image_update(self.context,
+                                                  image.image_id,
+                                                  image_values,
+                                                  purge_props=True,
+                                                  from_state=from_state,
+                                                  atomic_props=(
+                                                      IMAGE_ATOMIC_PROPS))
+        except (exception.ImageNotFound, exception.Forbidden):
+            msg = _("No image found with ID %s") % image.image_id
+            raise exception.ImageNotFound(msg)
         self.db_api.image_tag_set_all(self.context, image.image_id,
                                       image.tags)
         image.updated_at = new_values['updated_at']
@@ -333,7 +327,36 @@ class ImageMemberRepo(object):
             db_api_image_member[0])
         return image_member
 
+class PluginsRepo(object):
 
+    def __init__(self, context, db_api):
+        self.context = context
+        self.db_api = db_api
+
+    def list(self):
+        db_api_plugins = self.db_api.plugin_get_all(self.context)
+        plugins = []
+        for db_api_plugin in db_api_plugins:
+            plugin = self._format_plugin_from_db(db_api_plugin)
+            plugins.append(plugin)
+        LOG.debug("####################### ********DB init******************########################")
+        LOG.debug(plugins)
+        return plugins
+
+    def _format_plugin_from_db(self, db_image):
+        LOG.debug("######### fromat from db #########")
+        LOG.debug(db_image['id'])
+        return glance.domain.Plugin(
+            plugin_id=db_image['id'],
+            name=db_image['name'],
+            type=db_image['type'],
+            created_at=db_image['created_at'],
+            updated_at=db_image['updated_at'],
+            description_en=db_image['description_en'],
+            description_fa=db_image['description_fa'],
+            platform=db_image['platform'],
+            version=db_image['version'],
+        )
 class TaskRepo(object):
 
     def __init__(self, context, db_api):
@@ -473,8 +496,12 @@ class MetadefNamespaceRepo(object):
         )
 
     def get(self, namespace):
-        db_api_namespace = self.db_api.metadef_namespace_get(
-            self.context, namespace)
+        try:
+            db_api_namespace = self.db_api.metadef_namespace_get(
+                self.context, namespace)
+        except (exception.NotFound, exception.Forbidden):
+            msg = _('Could not find namespace %s') % namespace
+            raise exception.NotFound(msg)
         return self._format_namespace_from_db(db_api_namespace)
 
     def list(self, marker=None, limit=None, sort_key='created_at',
@@ -846,7 +873,7 @@ class MetadefTagRepo(object):
             self._format_metadef_tag_to_db(metadata_tag)
         )
 
-    def add_tags(self, metadata_tags, can_append=False):
+    def add_tags(self, metadata_tags):
         tag_list = []
         namespace = None
         for metadata_tag in metadata_tags:
@@ -855,7 +882,7 @@ class MetadefTagRepo(object):
                 namespace = metadata_tag.namespace
 
         self.db_api.metadef_tag_create_tags(
-            self.context, namespace, tag_list, can_append)
+            self.context, namespace, tag_list)
 
     def get(self, namespace, name):
         try:
