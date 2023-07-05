@@ -14,9 +14,7 @@
 #    under the License.
 import copy
 import functools
-import json
 import os
-import urllib.request
 
 import glance_store as store_api
 from glance_store import backend
@@ -24,9 +22,9 @@ from glance_store import exceptions as store_exceptions
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import encodeutils
-from oslo_utils import excutils
 from oslo_utils import timeutils
 from oslo_utils import units
+import six
 import taskflow
 from taskflow.patterns import linear_flow as lf
 from taskflow import retry
@@ -35,13 +33,11 @@ from taskflow import task
 from glance.api import common as api_common
 import glance.async_.flows._internal_plugins as internal_plugins
 import glance.async_.flows.plugins as import_plugins
-from glance.async_ import utils
 from glance.common import exception
 from glance.common.scripts.image_import import main as image_import
 from glance.common.scripts import utils as script_utils
 from glance.common import store_utils
 from glance.i18n import _, _LE, _LI
-from glance.quota import keystone as ks_quota
 
 
 LOG = logging.getLogger(__name__)
@@ -82,30 +78,6 @@ Possible values:
 
 CONF.register_opts(api_import_opts, group='image_import_opts')
 
-glance_download_opts = [
-    cfg.ListOpt('extra_properties',
-                item_type=cfg.types.String(quotes=True),
-                bounds=True,
-                default=[
-                    'hw_', 'trait:', 'os_distro', 'os_secure_boot',
-                    'os_type'],
-                help=_("""
-Specify metadata prefix to be set on the target image when using
-glance-download. All other properties coming from the source image won't be set
-on the target image. If specified metadata does not exist on the source image
-it won't be set on the target image. Note you can't set the os_glance prefix
-as it is reserved by glance, so the related properties won't be set on the
-target image.
-
-Possible values:
-    * List containing extra_properties prefixes: ['os_', 'architecture']
-
-""")),
-]
-
-CONF.register_opts(glance_download_opts, group='glance_download_properties')
-
-
 # TODO(jokke): We should refactor the task implementations so that we do not
 # need to duplicate what we have already for example in base_import.py.
 
@@ -114,12 +86,6 @@ class _NoStoresSucceeded(exception.GlanceException):
 
     def __init__(self, message):
         super(_NoStoresSucceeded, self).__init__(message)
-
-
-class _InvalidGlanceDownloadImageStatus(exception.GlanceException):
-
-    def __init__(self, message):
-        super(_InvalidGlanceDownloadImageStatus, self).__init__(message)
 
 
 class ImportActionWrapper(object):
@@ -241,18 +207,6 @@ class _ImportActions(object):
         return copy.deepcopy(self._image.locations)
 
     @property
-    def image_disk_format(self):
-        return self._image.disk_format
-
-    @property
-    def image_container_format(self):
-        return self._image.container_format
-
-    @property
-    def image_extra_properties(self):
-        return dict(self._image.extra_properties)
-
-    @property
     def image_status(self):
         return self._image.status
 
@@ -355,7 +309,7 @@ class _ImportActions(object):
                  ones is present in attrs.
         """
         allowed = ['status', 'disk_format', 'container_format',
-                   'virtual_size', 'size']
+                   'virtual_size']
         for attr, value in attrs.items():
             if attr not in allowed:
                 raise AttributeError('Setting %s is not allowed' % attr)
@@ -597,7 +551,7 @@ class _ImportToStore(task.Task):
         """
         # NOTE(flaper87): Let's dance... and fall
         #
-        # Unfortunately, because of the way our domain layers work and
+        # Unfortunatelly, because of the way our domain layers work and
         # the checks done in the FS store, we can't simply rename the file
         # and set the location. To do that, we'd have to duplicate the logic
         # of every and each of the domain factories (quota, location, etc)
@@ -651,7 +605,7 @@ class _ImportToStore(task.Task):
                                   set_active=self.set_active,
                                   callback=self._status_callback)
         # NOTE(yebinama): set_image_data catches Exception and raises from
-        # them. Can't be more specific on exceptions caught.
+        # them. Can't be more specific on exceptions catched.
         except Exception:
             if self.all_stores_must_succeed:
                 raise
@@ -748,12 +702,12 @@ class _CompleteTask(task.Task):
             # necessary
             log_msg = _LE("Task ID %(task_id)s failed. Error: %(exc_type)s: "
                           "%(e)s")
-            LOG.exception(log_msg, {'exc_type': str(type(e)),
+            LOG.exception(log_msg, {'exc_type': six.text_type(type(e)),
                                     'e': encodeutils.exception_to_unicode(e),
                                     'task_id': task.task_id})
 
             err_msg = _("Error: %(exc_type)s: %(e)s")
-            task.fail(err_msg % {'exc_type': str(type(e)),
+            task.fail(err_msg % {'exc_type': six.text_type(type(e)),
                                  'e': encodeutils.exception_to_unicode(e)})
         finally:
             self.task_repo.save(task)
@@ -784,114 +738,6 @@ class _CompleteTask(task.Task):
                  {'task_id': self.task_id, 'task_type': self.task_type})
 
 
-class _ImportMetadata(task.Task):
-
-    default_provides = 'image_size'
-
-    def __init__(self, task_id, task_type, context, action_wrapper,
-                 import_req):
-        self.task_id = task_id
-        self.task_type = task_type
-        self.context = context
-        self.action_wrapper = action_wrapper
-        self.import_req = import_req
-        self.props_to_copy = CONF.glance_download_properties.extra_properties
-        # We store the properties that will be set in case we are reverting
-        self.properties = {}
-        self.old_properties = {}
-        self.old_attributes = {}
-        super(_ImportMetadata, self).__init__(
-            name='%s-ImportMetdata-%s' % (task_type, task_id))
-
-    def execute(self):
-        try:
-            glance_endpoint = utils.get_glance_endpoint(
-                self.context,
-                self.import_req['method']['glance_region'],
-                self.import_req['method']['glance_service_interface'])
-            glance_image_id = self.import_req['method']['glance_image_id']
-            image_download_metadata_url = '%s/v2/images/%s' % (
-                glance_endpoint, glance_image_id)
-            LOG.info(_LI("Fetching glance image metadata from remote host %s"),
-                     image_download_metadata_url)
-            token = self.context.auth_token
-            request = urllib.request.Request(image_download_metadata_url,
-                                             headers={'X-Auth-Token': token})
-            with urllib.request.urlopen(request) as payload:
-                data = json.loads(payload.read().decode('utf-8'))
-
-            if data.get('status') != 'active':
-                raise _InvalidGlanceDownloadImageStatus(
-                    _('Source image status should be active instead of %s')
-                    % data['status'])
-
-            for key, value in data.items():
-                for metadata in self.props_to_copy:
-                    if key.startswith(metadata):
-                        self.properties[key] = value
-
-            with self.action_wrapper as action:
-                # Save the old properties in case we need to revert
-                self.old_properties = action.image_extra_properties
-                self.old_attributes = {
-                    'container_format': action.image_container_format,
-                    'disk_format': action.image_disk_format,
-                }
-
-                # Set disk_format and container_format attributes
-                action.set_image_attribute(
-                    disk_format=data['disk_format'],
-                    container_format=data['container_format'])
-
-                # Set extra propoerties
-                if self.properties:
-                    action.set_image_extra_properties(self.properties)
-            try:
-                return int(data['size'])
-            except (ValueError, KeyError):
-                raise exception.ImportTaskError(
-                    _('Size attribute of remote image %s could not be '
-                      'determined.' % glance_image_id))
-        except Exception as e:
-            with excutils.save_and_reraise_exception():
-                LOG.error(
-                    "Task %(task_id)s failed with exception %(error)s", {
-                        "error": encodeutils.exception_to_unicode(e),
-                        "task_id": self.task_id
-                    })
-
-    def revert(self, result, **kwargs):
-        """Revert the extra properties set and set the image in queued"""
-        with self.action_wrapper as action:
-            for image_property in self.properties:
-                if image_property not in self.old_properties:
-                    action.pop_extra_property(image_property)
-            action.set_image_extra_properties(self.old_properties)
-            action.set_image_attribute(status='queued',
-                                       **self.old_attributes)
-
-
-def assert_quota(context, task_repo, task_id, stores,
-                 action_wrapper, enforce_quota_fn,
-                 **enforce_kwargs):
-    try:
-        enforce_quota_fn(context, context.owner, **enforce_kwargs)
-    except exception.LimitExceeded as e:
-        with excutils.save_and_reraise_exception():
-            with action_wrapper as action:
-                action.remove_importing_stores(stores)
-                if action.image_status == 'importing':
-                    action.set_image_attribute(status='queued')
-            action_wrapper.drop_lock_for_task()
-            task = script_utils.get_task(task_repo, task_id)
-            if task is None:
-                LOG.error(_LE('Failed to find task %r to update after '
-                              'quota failure'), task_id)
-            else:
-                task.fail(str(e))
-                task_repo.save(task)
-
-
 def get_flow(**kwargs):
     """Return task flow
 
@@ -908,13 +754,11 @@ def get_flow(**kwargs):
     image_repo = kwargs.get('image_repo')
     admin_repo = kwargs.get('admin_repo')
     image_id = kwargs.get('image_id')
-    import_req = kwargs.get('import_req')
-    import_method = import_req['method']['name']
-    uri = import_req['method'].get('uri')
+    import_method = kwargs.get('import_req')['method']['name']
+    uri = kwargs.get('import_req')['method'].get('uri')
     stores = kwargs.get('backend', [None])
-    all_stores_must_succeed = import_req.get(
+    all_stores_must_succeed = kwargs.get('import_req').get(
         'all_stores_must_succeed', True)
-    context = kwargs.get('context')
 
     separator = ''
     if not CONF.enabled_backends and not CONF.node_staging_uri.endswith('/'):
@@ -937,10 +781,7 @@ def get_flow(**kwargs):
 
     flow.add(_ImageLock(task_id, task_type, action_wrapper))
 
-    if import_method in ['web-download', 'copy-image', 'glance-download']:
-        if import_method == 'glance-download':
-            flow.add(_ImportMetadata(task_id, task_type,
-                                     context, action_wrapper, import_req))
+    if import_method in ['web-download', 'copy-image', 'image-builder-pipeline']:
         internal_plugin = internal_plugins.get_import_plugin(**kwargs)
         flow.add(internal_plugin)
         if CONF.enabled_backends:
@@ -956,8 +797,11 @@ def get_flow(**kwargs):
     # Note(jokke): The plugins were designed to act on the image data or
     # metadata during the import process before the image goes active. It
     # does not make sense to try to execute them during 'copy-image'.
-    if import_method != 'copy-image':
+    if import_method != 'copy-image' and import_method != "image-builder-pipeline":
         for plugin in import_plugins.get_import_plugins(**kwargs):
+            flow.add(plugin)
+    elif import_method == "image-builder-pipeline":
+        for plugin in import_plugins.get_chosen_import_plugins(**kwargs):
             flow.add(plugin)
     else:
         LOG.debug("Skipping plugins on 'copy-image' job.")
@@ -997,29 +841,8 @@ def get_flow(**kwargs):
     with action_wrapper as action:
         if import_method != 'copy-image':
             action.set_image_attribute(status='importing')
-        image_size = (action.image_size or 0) // units.Mi
         action.add_importing_stores(stores)
         action.remove_failed_stores(stores)
         action.pop_extra_property('os_glance_stage_host')
-
-    # After we have marked the image as intended, check quota to make
-    # sure we are not over a limit, otherwise we roll back.
-    if import_method == 'glance-direct':
-        # We know the size of the image in staging, so we can check
-        # against available image_size_total quota.
-        assert_quota(kwargs['context'], task_repo, task_id,
-                     stores, action_wrapper,
-                     ks_quota.enforce_image_size_total,
-                     delta=image_size)
-    elif import_method in ('copy-image', 'web-download', 'glance-download'):
-        # The copy-image, web-download and glance-download methods will use
-        # staging space to do their work, so check that quota.
-        assert_quota(kwargs['context'], task_repo, task_id,
-                     stores, action_wrapper,
-                     ks_quota.enforce_image_staging_total,
-                     delta=image_size)
-        assert_quota(kwargs['context'], task_repo, task_id,
-                     stores, action_wrapper,
-                     ks_quota.enforce_image_count_uploading)
 
     return flow
