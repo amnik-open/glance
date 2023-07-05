@@ -29,3 +29,14 @@ def get_import_plugins(**kwargs):
                                              invoke_kwds=kwargs)
     for extension in extensions.extensions:
         yield extension.obj
+
+def get_chosen_import_plugins(**kwargs):
+    plugins = kwargs.get('import_req')['method']['plugins']
+    task_list = plugins.split(",")
+    extensions = named.NamedExtensionManager('glance.image_import.plugins',
+                                             names=task_list,
+                                             name_order=True,
+                                             invoke_on_load=True,
+                                             invoke_kwds=kwargs)
+    for extension in extensions.extensions:
+        yield extension.obj
